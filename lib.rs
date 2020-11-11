@@ -7,10 +7,10 @@ mod charityraffle {
     use ink_storage::collections::HashMap as StorageHashMap;
     use ink_storage::collections::Vec;
 
-    const MINIMUM_TOKEN: u128 = 10_000_000_000_000; // 0.01 unit
-    const MAXIMUM_TOKEN: u128 = 100_000_000_000_000; // 0.1 unit
+    const MINIMUM_TOKEN: Balance = 10_000_000_000_000; // 0.01 unit
+    const MAXIMUM_TOKEN: Balance = 100_000_000_000_000; // 0.1 unit
 
-    const COUNTDOWN: Timestamp = 60000; // 60s or 900000
+    const COUNTDOWN: Timestamp = 900_000;
 
     #[ink(storage)]
     pub struct Charity {
@@ -24,22 +24,26 @@ mod charityraffle {
 
     #[ink(event)]
     pub struct Play {
+        #[ink(topic)]
         player: AccountId,
     }
 
     #[ink(event)]
     pub struct Draw {
+        #[ink(topic)]
         winner: AccountId,
     }
 
     #[ink(event)]
     pub struct CountDownStarted {
+        #[ink(topic)]
         player: AccountId,
+        #[ink(topic)]
         timestamp: Timestamp,
     }
 
-    #[cfg_attr(feature = "std", derive(::scale_info::TypeInfo))]
     #[derive(Debug, PartialEq, Eq, scale::Encode, scale::Decode)]
+    #[cfg_attr(feature = "std", derive(::scale_info::TypeInfo))]
     pub enum Error {
         Finished,
         InvalidEntryAmount,
@@ -66,12 +70,12 @@ mod charityraffle {
 
         #[ink(message)]
         pub fn get_beneficiary_id(&self) -> AccountId {
-            self.beneficiary
+            return self.beneficiary;
         }
 
         #[ink(message)]
         pub fn participants(&self) -> u32 {
-            self.players_vec.len()
+            return self.players_vec.len();
         }
 
         #[ink(message)]
@@ -88,7 +92,7 @@ mod charityraffle {
 
         #[ink(message)]
         pub fn get_amount_collected(&self) -> Balance {
-            self.amount_collected
+            return self.amount_collected;
         }
 
         #[ink(message, payable)]
@@ -100,7 +104,7 @@ mod charityraffle {
             let caller = self.env().caller();
             let amount = self.env().transferred_balance();
 
-            if amount >= MAXIMUM_TOKEN || amount <= MINIMUM_TOKEN {
+            if amount < MINIMUM_TOKEN || amount > MAXIMUM_TOKEN {
                 return Err(InvalidEntryAmount);
             }
 
@@ -114,7 +118,7 @@ mod charityraffle {
 
             self.env().emit_event(Play { player: caller });
 
-            if self.countdown.is_none() && self.participants() >= 5 {
+            if self.countdown.is_none() && self.participants() >= 3 {
                 let timestamp = Self::env().block_timestamp();
                 self.countdown = Some(timestamp);
 
@@ -138,7 +142,7 @@ mod charityraffle {
                 return Err(CountDownNotStarted);
             }
 
-            if self.participants() < 5 {
+            if self.participants() < 3 {
                 return Err(NotEnoughPlayer);
             }
 

@@ -1,71 +1,127 @@
 #![cfg_attr(not(feature = "std"), no_std)]
+
 use ink_lang as ink;
 
 #[ink::contract]
-mod charityraffle {
+mod raffle {
     #[cfg(not(feature = "ink-as-dependency"))]
     use ink_storage::collections::HashMap as StorageHashMap;
-    use ink_storage::collections::Vec;
 
-    const MINIMUM_TOKEN: Balance = 10_000_000_000_000; // 0.01 unit
-    const MAXIMUM_TOKEN: Balance = 100_000_000_000_000; // 0.1 unit
-
-    const COUNTDOWN: Timestamp = 900_000;
+    use ink_env::hash::Keccak256;
+    const MIN_PARTICIPANTS: u64 = 5;
+    const MAX_WINNERS: u64 = 2;
+    const COUNTDOWN: u64 = 900000;
+    const MIN_TOKEN: u128 = 10_000_000_000_000; // 0.01 unit
+    const MAX_TOKEN: u128 = 100_000_000_000_000; // 0.1 unit
 
     #[ink(storage)]
-    pub struct Charity {
+    pub struct Raffle {
         beneficiary: AccountId,
-        players: StorageHashMap<AccountId, Balance>,
-        players_vec: Vec<AccountId>,
-        countdown: Option<Timestamp>,
-        winners: Vec<AccountId>,
-        amount_collected: Balance,
+        amount_collected: u128,
+        participants: u64,
+        draws: u64,
+        start_time: Timestamp,
+        end_time: Timestamp,
+        players: StorageHashMap<AccountId, u64>,
+        entries: StorageHashMap<u64, AccountId>,
+        winners: [Option<AccountId>; MAX_WINNERS as usize],
     }
 
-    #[ink(event)]
-    pub struct Play {
-        #[ink(topic)]
-        player: AccountId,
-    }
-
-    #[ink(event)]
-    pub struct Draw {
-        #[ink(topic)]
-        winner: AccountId,
-    }
-
-    #[ink(event)]
-    pub struct CountDownStarted {
-        #[ink(topic)]
-        player: AccountId,
-        #[ink(topic)]
-        timestamp: Timestamp,
-    }
-
-    #[derive(Debug, PartialEq, Eq, scale::Encode, scale::Decode)]
-    #[cfg_attr(feature = "std", derive(::scale_info::TypeInfo))]
-    pub enum Error {
-        Finished,
-        InvalidEntryAmount,
-        HasPlayed,
-        CountDownNotStarted,
-        NotEnoughPlayer,
-    }
-
-    pub type Re<T> = core::result::Result<T, Error>;
-    pub use Error::*;
-
-    impl Charity {
+    impl Raffle {
         #[ink(constructor)]
         pub fn new(beneficiary: AccountId) -> Self {
             Self {
-                beneficiary,
-                players: StorageHashMap::new(),
-                players_vec: Vec::new(),
-                winners: Vec::new(),
-                countdown: None,
+                beneficiary: beneficiary,
                 amount_collected: 0,
+                participants: 0,
+                draws: 0,
+                start_time: 0,
+                end_time: 0,
+                players: StorageHashMap::new(),
+                entries: StorageHashMap::new(),
+                winners: [None, None],
             }
+        }
+
+        fn now(&self) -> Timestamp {
+            return self.env().block_timestamp();
+        }
+
+        fn rand(&self) -> u64 {
+            let mut output: u64 = 0;
+            let encodable = [
+                self.now(),
+                self.start_time,
+                self.end_time,
+                self.participants,
+                self.draws,
+            ];
+            let encoded = self.env().hash_encoded::<Keccak256, _>(&encodable);
+            let mut hashed = self.env().random(&encoded);
+            let random = hashed.as_mut();
+            for rand in random.iter() {
+                output += *rand as u64;
+            }
+            return output;
+        }
+
+        #[ink(message, payable)]
+        pub fn play(&mut self) {
+            let now = self.now();
+            let caller = self.env().caller();
+            let amount = self.env().transferred_balance();
+            assert!(
+                self.end_time == 0 || self.participants < MIN_PARTICIPANTS || now < self.end_time,
+                "Closed for new entants"
+            );
+
+            assert!(
+                amount >= MIN_TOKEN && amount <= MAX_TOKEN,
+                "Wrong amount paid"
+            );
+
+            assert!(
+                self.players.contains_key(&caller) == false,
+                "Must only enter once"
+            );
+
+            self.participants += 1;
+            self.players.insert(caller, self.participants);
+            self.entries.insert(self.participants, caller);
+
+            if self.participants == MIN_PARTICIPANTS {
+                self.start_time = self.now();
+                self.end_time = self.start_time + COUNTDOWN;
+            }
+
+            self.amount_collected += amount;
+        }
+
+        #[ink(message)]
+        pub fn draw(&mut self) {
+            assert!(
+                self.end_time > 0
+                    && self.participants >= MIN_PARTICIPANTS
+                    && self.now() >= self.end_time,
+                "Not ready to draw yet"
+            );
+
+            assert!(self.draws < MAX_WINNERS, "Winners already decided");
+            let winner = self.rand() % self.participants + 1;
+
+            let winning_account = self.entries[&winner];
+            self.winners[self.draws as usize] = Some(winning_account);
+
+            self.draws += 1;
+
+            if self.draws == MAX_WINNERS {
+                let _ = self.env().transfer(self.beneficiary, self.amount_collected);
+            }
+        }
+
+        #[ink(message)]
+        pub fn get_start(&self) -> u64 {
+            return self.start_time;
         }
 
         #[ink(message)]
@@ -74,101 +130,28 @@ mod charityraffle {
         }
 
         #[ink(message)]
-        pub fn participants(&self) -> u32 {
-            return self.players_vec.len();
+        pub fn get_end(&self) -> u64 {
+            return self.end_time;
         }
 
         #[ink(message)]
-        pub fn finished(&self) -> bool {
-            return self.winners.len() == 2;
+        pub fn participants_counter(&self) -> u64 {
+            return self.participants;
         }
 
         #[ink(message)]
-        pub fn winners_address(&self) -> (Option<AccountId>, Option<AccountId>) {
-            let first = self.winners.first().map(|w| w.clone());
-            let last = self.winners.last().map(|w| w.clone());
-            return (first, last);
+        pub fn get_winners_drawn(&self) -> u64 {
+            return self.draws;
         }
 
         #[ink(message)]
-        pub fn get_amount_collected(&self) -> Balance {
+        pub fn get_winners(&self) -> [Option<AccountId>; MAX_WINNERS as usize] {
+            return self.winners;
+        }
+
+        #[ink(message)]
+        pub fn get_amount_collected(&self) -> u128 {
             return self.amount_collected;
-        }
-
-        #[ink(message, payable)]
-        pub fn play(&mut self) -> Re<()> {
-            if self.finished() {
-                return Err(Finished);
-            }
-
-            let caller = self.env().caller();
-            let amount = self.env().transferred_balance();
-
-            if amount < MINIMUM_TOKEN || amount > MAXIMUM_TOKEN {
-                return Err(InvalidEntryAmount);
-            }
-
-            if self.players.contains_key(&caller) {
-                return Err(HasPlayed);
-            }
-
-            self.players.insert(caller, amount);
-            self.players_vec.push(caller);
-            self.amount_collected += amount;
-
-            self.env().emit_event(Play { player: caller });
-
-            if self.countdown.is_none() && self.participants() >= 3 {
-                let timestamp = Self::env().block_timestamp();
-                self.countdown = Some(timestamp);
-
-                self.env().emit_event(CountDownStarted {
-                    timestamp,
-                    player: caller,
-                });
-            }
-            Ok(())
-        }
-
-        #[ink(message)]
-        pub fn draw(&mut self) -> Re<()> {
-            if self.finished() {
-                return Err(Finished);
-            }
-
-            if self.countdown.is_some()
-                && Self::env().block_timestamp() - self.countdown.unwrap() < COUNTDOWN
-            {
-                return Err(CountDownNotStarted);
-            }
-
-            if self.participants() < 3 {
-                return Err(NotEnoughPlayer);
-            }
-
-            let choosed_winner = Self::get_random_number() % self.participants();
-            let winner = self.players_vec[choosed_winner];
-            self.winners.push(winner);
-
-            self.env().emit_event(Draw { winner });
-
-            let last_player = self.players_vec.pop().unwrap();
-            let _ = self.players_vec.set(choosed_winner, last_player);
-
-            Ok(())
-        }
-
-        fn get_random_number() -> u32 {
-            let seed: [u8; 8] = [1, 1, 1, 1, 1, 1, 1, 1];
-            let random_hash = Self::env().random(&seed);
-            Self::as_u32_be(&random_hash.as_ref())
-        }
-
-        fn as_u32_be(arr: &[u8]) -> u32 {
-            ((arr[0] as u32) << 24)
-                + ((arr[1] as u32) << 16)
-                + ((arr[2] as u32) << 8)
-                + ((arr[3] as u32) << 0)
         }
     }
 }
